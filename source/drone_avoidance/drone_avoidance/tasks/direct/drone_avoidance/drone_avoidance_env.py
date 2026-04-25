@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
-import math
+
 import torch
-from collections.abc import Sequence
+
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import sample_uniform
+
+import gymnasium as gym
+
+from isaaclab.utils.math import subtract_frame_transforms
 
 from .drone_avoidance_env_cfg import DroneAvoidanceEnvCfg
 
@@ -24,24 +26,35 @@ class DroneAvoidanceEnv(DirectRLEnv):
     def __init__(self, cfg: DroneAvoidanceEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        self._cart_dof_idx, _ = self.robot.find_joints(self.cfg.cart_dof_name)
-        self._pole_dof_idx, _ = self.robot.find_joints(self.cfg.pole_dof_name)
+        self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
+        self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
-        self.joint_pos = self.robot.data.joint_pos
-        self.joint_vel = self.robot.data.joint_vel
+        self._episode_sums = {
+            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+            for key in [
+                "lin_vel",
+                "ang_vel",
+                "distance_to_goal",
+            ]
+        }
 
+        self._body_id = self.robot.find_bodies("body")[0]
+        self._robot_mass = self.robot.root_physx_view.get_masses()[0].sum()
+        self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
+        self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
+    
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        # add ground plane
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        # clone and replicate
-        self.scene.clone_environments(copy_from_source=False)
-        # we need to explicitly filter collisions for CPU simulation
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[])
-        # add articulation to scene
         self.scene.articulations["robot"] = self.robot
-        # add lights
+
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+        self.terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+
+        self.scene.clone_environments(copy_from_source=False)
+
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
