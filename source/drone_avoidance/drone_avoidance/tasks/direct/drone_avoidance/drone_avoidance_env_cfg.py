@@ -54,7 +54,7 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     )
 
     # robot(s)
-    robot_cfg: ArticulationCfg = CRAZYFILE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot_cfg: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
