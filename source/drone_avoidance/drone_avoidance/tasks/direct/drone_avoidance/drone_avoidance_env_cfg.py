@@ -22,8 +22,9 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.0
     # - spaces definition
     action_space = 4
-    observation_space = 12
+    observation_space = 16
     state_space = 0
+    debug_vis = True
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -70,3 +71,7 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
+    obstacle_radius = 0.35
+    collision_penalty = -10.0
+    near_obstacle_reward_scale = -4.0
+    near_obstacle_distance = 1.0
