@@ -32,10 +32,11 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
-        self._obstacle_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._obstacle_pos_w = torch.zeros(self.num_envs, self.cfg.num_obstacles, 3, device=self.device)
         self._collision_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._died_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._obstacle_radius = torch.full(
-            (self.num_envs, 1),
+            (self.num_envs, self.cfg.num_obstacles, 1),
             self.cfg.obstacle_radius,
             device=self.device,
         )
@@ -91,18 +92,25 @@ class DroneAvoidanceEnv(DirectRLEnv):
             self._desired_pos_w,
         )
         obstacle_pos_b, _ = subtract_frame_transforms(
-            self.robot.data.root_pos_w,
-            self.robot.data.root_quat_w,
+            self.robot.data.root_pos_w.unsqueeze(1).expand(-1, self.cfg.num_obstacles, -1),
+            self.robot.data.root_quat_w.unsqueeze(1).expand(-1, self.cfg.num_obstacles, -1),
             self._obstacle_pos_w,
         )
+
+        obstacle_obs = torch.cat(
+            [
+                obstacle_pos_b,
+                self._obstacle_radius,
+            ],
+            dim=-1,
+        ).reshape(self.num_envs, -1)
         obs = torch.cat(
             [
                 self.robot.data.root_lin_vel_b,
                 self.robot.data.root_ang_vel_b,
                 self.robot.data.projected_gravity_b,
                 desired_pos_b,
-                obstacle_pos_b,
-                self._obstacle_radius,
+                obstacle_obs,
 
             ],
             dim=-1,
@@ -115,10 +123,11 @@ class DroneAvoidanceEnv(DirectRLEnv):
         ang_vel = torch.sum(torch.square(self.robot.data.root_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self.robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
-        distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w, dim=1)
-        collision = distance_to_obstacle < self.cfg.obstacle_radius
+        distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
+        min_distance_to_obstacle = torch.min(distance_to_obstacle, dim=1).values
+        collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius, dim=1)
         near_obstacle = torch.clamp(
-            self.cfg.near_obstacle_distance - distance_to_obstacle,
+            self.cfg.near_obstacle_distance - min_distance_to_obstacle,
             min=0.0,
         ) / self.cfg.near_obstacle_distance
 
@@ -141,14 +150,15 @@ class DroneAvoidanceEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(
-            self.robot.data.root_pos_w[:, 2] < 0.1,
-            self.robot.data.root_pos_w[:, 2] > 2.0,
+            self.robot.data.root_pos_w[:, 2] < self.cfg.flight_z_min,
+            self.robot.data.root_pos_w[:, 2] > self.cfg.flight_z_max,
         )
 
-        distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w, dim=1)
-        collision = distance_to_obstacle < self.cfg.obstacle_radius
+        distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
+        collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius, dim=1)
         
         self._collision_buf = collision
+        self._died_buf = died
 
         terminated = torch.logical_or(died, collision)
         return terminated, time_out
@@ -176,6 +186,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         extras["Episode_Termination/collision"] = torch.count_nonzero(self._collision_buf[env_ids]).item()
+        extras["Episode_Termination/died"] = torch.count_nonzero(self._died_buf[env_ids]).item()
+
         self.extras["log"].update(extras)
 
         self.robot.reset(env_ids)
@@ -189,18 +201,28 @@ class DroneAvoidanceEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
 
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(
+            -self.cfg.goal_xy_range,
+            self.cfg.goal_xy_range,
+        )
         self._desired_pos_w[env_ids, :2] += self.terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(
+            self.cfg.goal_z_min,
+            self.cfg.goal_z_max,
+        )
         start_pos_w = self.terrain.env_origins[env_ids].clone()
         start_pos_w[:, 2] = 1.0
 
-        alpha = torch.zeros(len(env_ids), 1, device=self.device).uniform_(0.35, 0.65)
-        self._obstacle_pos_w[env_ids] = start_pos_w + alpha * (self._desired_pos_w[env_ids] - start_pos_w)
+        alpha = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(0.25, 0.75)
+        path_vec = self._desired_pos_w[env_ids].unsqueeze(1) - start_pos_w.unsqueeze(1)
+        self._obstacle_pos_w[env_ids] = start_pos_w.unsqueeze(1) + alpha * path_vec
 
-        side_offset = torch.zeros(len(env_ids), 1, device=self.device).uniform_(-0.4, 0.4)
-        self._obstacle_pos_w[env_ids, 1:2] += side_offset
-        self._obstacle_pos_w[env_ids, 2] = torch.zeros_like(self._obstacle_pos_w[env_ids, 2]).uniform_(0.7, 1.3)
+        side_offset = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(-0.7, 0.7)
+        self._obstacle_pos_w[env_ids, :, 1:2] += side_offset
+        self._obstacle_pos_w[env_ids, :, 2] = torch.zeros_like(self._obstacle_pos_w[env_ids, :, 2]).uniform_(
+            self.cfg.goal_z_min,
+            self.cfg.goal_z_max,
+        )
 
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
@@ -235,7 +257,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
     
     def _debug_vis_callback(self, event):
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
-        self.obstacle_visualizer.visualize(self._obstacle_pos_w)
+        self.obstacle_visualizer.visualize(self._obstacle_pos_w.reshape(-1, 3))
         
 
 
