@@ -10,13 +10,13 @@ import torch
 
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers import SPHERE_MARKER_CFG, CUBOID_MARKER_CFG
-
+from isaaclab.sensors import TiledCamera
 import gymnasium as gym
-
+import torch.nn.functional as F
 from isaaclab.utils.math import subtract_frame_transforms
 
 from .drone_avoidance_env_cfg import DroneAvoidanceEnvCfg
@@ -49,7 +49,11 @@ class DroneAvoidanceEnv(DirectRLEnv):
                 "ang_vel",
                 "distance_to_goal",
                 "near_obstacle",
-                "collision"
+                "collision",
+                "alive",
+                "upright",
+                "action",
+                "death"
             ]
         }
 
@@ -61,13 +65,18 @@ class DroneAvoidanceEnv(DirectRLEnv):
     
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        self.scene.articulations["robot"] = self.robot
+        self.obstacle = RigidObject(self.cfg.obstacle_cfg)
+        self.depth_camera = TiledCamera(self.cfg.depth_camera)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self.terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
         self.scene.clone_environments(copy_from_source=False)
+
+        self.scene.sensors["depth_camera"] = self.depth_camera
+        self.scene.rigid_objects["obstacle"] = self.obstacle
+        self.scene.articulations["robot"] = self.robot
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -97,6 +106,21 @@ class DroneAvoidanceEnv(DirectRLEnv):
             self._obstacle_pos_w,
         )
 
+        depth = self.depth_camera.data.output["depth"]
+        depth = torch.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth = torch.clamp(depth, 0.0, self.cfg.depth_max_distance) / self.cfg.depth_max_distance
+        if depth.ndim == 3:
+            depth = depth.unsqueeze(1)
+        elif depth.shape[-1] == 1:
+            depth = depth.permute(0, 3, 1, 2)
+
+        depth_small = F.interpolate(
+            depth,
+            size=(self.cfg.depth_obs_height, self.cfg.depth_obs_width),
+            mode="area",
+        )
+        depth_obs = depth_small.reshape(self.num_envs, -1)
+
         obstacle_obs = torch.cat(
             [
                 obstacle_pos_b,
@@ -110,7 +134,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
                 self.robot.data.root_ang_vel_b,
                 self.robot.data.projected_gravity_b,
                 desired_pos_b,
-                obstacle_obs,
+                depth_obs,
 
             ],
             dim=-1,
@@ -130,6 +154,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
             self.cfg.near_obstacle_distance - min_distance_to_obstacle,
             min=0.0,
         ) / self.cfg.near_obstacle_distance
+        alive = torch.ones(self.num_envs, device=self.device)
+        upright = torch.square(self.robot.data.projected_gravity_b[:, 2])
+        action_penalty = torch.sum(torch.square(self._actions), dim=1)
 
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -137,6 +164,10 @@ class DroneAvoidanceEnv(DirectRLEnv):
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "near_obstacle": near_obstacle * self.cfg.near_obstacle_reward_scale * self.step_dt,
             "collision": collision.float() * self.cfg.collision_penalty,
+            "alive": alive * self.cfg.alive_reward_scale * self.step_dt,
+            "upright": upright * self.cfg.upright_reward_scale * self.step_dt,
+            "action": action_penalty * self.cfg.action_penalty_scale * self.step_dt,
+            "death": self._died_buf.float() * self.cfg.death_penalty,
 
         }
 
@@ -164,9 +195,10 @@ class DroneAvoidanceEnv(DirectRLEnv):
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
-        if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self.robot._ALL_INDICES
-
+        if env_ids is None :
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids = env_ids.to(device=self.device, dtype=torch.long)
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self.robot.data.root_pos_w[env_ids],
             dim=1,
@@ -217,12 +249,18 @@ class DroneAvoidanceEnv(DirectRLEnv):
         path_vec = self._desired_pos_w[env_ids].unsqueeze(1) - start_pos_w.unsqueeze(1)
         self._obstacle_pos_w[env_ids] = start_pos_w.unsqueeze(1) + alpha * path_vec
 
-        side_offset = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(-0.7, 0.7)
+        side_offset = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(-0.2, 0.2)
         self._obstacle_pos_w[env_ids, :, 1:2] += side_offset
         self._obstacle_pos_w[env_ids, :, 2] = torch.zeros_like(self._obstacle_pos_w[env_ids, :, 2]).uniform_(
             self.cfg.goal_z_min,
             self.cfg.goal_z_max,
         )
+        obstacle_state = self.obstacle.data.default_root_state[env_ids].clone()
+        obstacle_state[:, :3] = self._obstacle_pos_w[env_ids, 0]
+        obstacle_state[:, 3:7] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
+        obstacle_state[:, 7:] = 0.0
+        self.obstacle.write_root_pose_to_sim(obstacle_state[:, :7], env_ids)
+        self.obstacle.write_root_velocity_to_sim(obstacle_state[:, 7:], env_ids)
 
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
@@ -259,5 +297,3 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
         self.obstacle_visualizer.visualize(self._obstacle_pos_w.reshape(-1, 3))
         
-
-
