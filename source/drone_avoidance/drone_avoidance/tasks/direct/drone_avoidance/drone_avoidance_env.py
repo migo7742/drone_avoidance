@@ -40,6 +40,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
             self.cfg.obstacle_radius,
             device=self.device,
         )
+        self._prev_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
         
 
         self._episode_sums = {
@@ -53,7 +54,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
                 "alive",
                 "upright",
                 "action",
-                "death"
+                "death",
+                "progress_to_goal",
             ]
         }
 
@@ -65,7 +67,13 @@ class DroneAvoidanceEnv(DirectRLEnv):
     
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        self.obstacle = RigidObject(self.cfg.obstacle_cfg)
+        self.obstacle = []
+        for i in range(self.cfg.num_obstacles):
+            obstacle_cfg = self.cfg.obstacle_cfg.replace(
+                prim_path=f"/World/envs/env_.*/Obstacle_{i}"
+            )
+            obstacle = RigidObject(obstacle_cfg)
+            self.obstacle.append(obstacle)
         self.depth_camera = TiledCamera(self.cfg.depth_camera)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -75,7 +83,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self.scene.clone_environments(copy_from_source=False)
 
         self.scene.sensors["depth_camera"] = self.depth_camera
-        self.scene.rigid_objects["obstacle"] = self.obstacle
+        for i, obstacle in enumerate(self.obstacle):
+            self.scene.rigid_objects[f"obstacle_{i}"] = obstacle
         self.scene.articulations["robot"] = self.robot
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -157,6 +166,11 @@ class DroneAvoidanceEnv(DirectRLEnv):
         alive = torch.ones(self.num_envs, device=self.device)
         upright = torch.square(self.robot.data.projected_gravity_b[:, 2])
         action_penalty = torch.sum(torch.square(self._actions), dim=1)
+        progress_to_goal = self._prev_distance_to_goal - distance_to_goal
+        died = torch.logical_or(
+            self.robot.data.root_pos_w[:, 2] < self.cfg.flight_z_min,
+            self.robot.data.root_pos_w[:, 2] > self.cfg.flight_z_max,
+        )
 
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -167,9 +181,12 @@ class DroneAvoidanceEnv(DirectRLEnv):
             "alive": alive * self.cfg.alive_reward_scale * self.step_dt,
             "upright": upright * self.cfg.upright_reward_scale * self.step_dt,
             "action": action_penalty * self.cfg.action_penalty_scale * self.step_dt,
-            "death": self._died_buf.float() * self.cfg.death_penalty,
+            "death": died.float() * self.cfg.death_penalty,
+            "progress_to_goal": progress_to_goal * self.cfg.progress_reward_scale,
 
         }
+
+        self._prev_distance_to_goal = distance_to_goal.detach()
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
@@ -188,6 +205,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
         distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
         collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius, dim=1)
         
+
         self._collision_buf = collision
         self._died_buf = died
 
@@ -199,10 +217,14 @@ class DroneAvoidanceEnv(DirectRLEnv):
             env_ids = torch.arange(self.num_envs, device=self.device)
         else:
             env_ids = env_ids.to(device=self.device, dtype=torch.long)
-        final_distance_to_goal = torch.linalg.norm(
+        final_distance_to_goal_each = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self.robot.data.root_pos_w[env_ids],
             dim=1,
-        ).mean()
+        )
+        final_distance_to_goal = final_distance_to_goal_each.mean()
+        success_rate = torch.mean((final_distance_to_goal_each < self.cfg.goal_radius).float())
+
+        
 
         extras = dict()
         for key in self._episode_sums.keys():
@@ -214,11 +236,23 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self.extras["log"].update(extras)
 
         extras = dict()
-        extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+
+        num_reset_envs = len(env_ids)
+
+        collision_count = torch.count_nonzero(self._collision_buf[env_ids]).item()
+        died_count = torch.count_nonzero(self._died_buf[env_ids]).item()
+        timeout_count = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
-        extras["Episode_Termination/collision"] = torch.count_nonzero(self._collision_buf[env_ids]).item()
-        extras["Episode_Termination/died"] = torch.count_nonzero(self._died_buf[env_ids]).item()
+        extras["Metrics/success_rate"] = success_rate.item()
+        extras["Metrics/collision_rate"] = collision_count / num_reset_envs
+        extras["Metrics/died_rate"] = died_count / num_reset_envs
+        extras["Metrics/timeout_rate"] = timeout_count / num_reset_envs
+
+        extras["Episode_Termination/collision"] = collision_count
+        extras["Episode_Termination/died"] = died_count
+        extras["Episode_Termination/time_out"] = timeout_count
+        
 
         self.extras["log"].update(extras)
 
@@ -230,6 +264,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
                 self.episode_length_buf,
                 high=int(self.max_episode_length),
             )
+
+        
 
         self._actions[env_ids] = 0.0
 
@@ -255,12 +291,14 @@ class DroneAvoidanceEnv(DirectRLEnv):
             self.cfg.goal_z_min,
             self.cfg.goal_z_max,
         )
-        obstacle_state = self.obstacle.data.default_root_state[env_ids].clone()
-        obstacle_state[:, :3] = self._obstacle_pos_w[env_ids, 0]
-        obstacle_state[:, 3:7] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
-        obstacle_state[:, 7:] = 0.0
-        self.obstacle.write_root_pose_to_sim(obstacle_state[:, :7], env_ids)
-        self.obstacle.write_root_velocity_to_sim(obstacle_state[:, 7:], env_ids)
+        
+        for i, obstacle in enumerate(self.obstacle):
+            obstacle_state = obstacle.data.default_root_state[env_ids].clone()
+            obstacle_state[:, :3] = self._obstacle_pos_w[env_ids, i]
+            obstacle_state[:, 3:7] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
+            obstacle_state[:, 7:] = 0.0
+            obstacle.write_root_pose_to_sim(obstacle_state[:, :7], env_ids)
+            obstacle.write_root_velocity_to_sim(obstacle_state[:, 7:], env_ids)
 
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
@@ -270,6 +308,11 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        self._prev_distance_to_goal[env_ids] = torch.linalg.norm(
+            self._desired_pos_w[env_ids] - self.robot.data.root_pos_w[env_ids],
+            dim=1,
+        )
     
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
