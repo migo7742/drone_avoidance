@@ -7,6 +7,14 @@ from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
+@configclass
+class CnnActorCriticCfg(RslRlPpoActorCriticCfg):
+    class_name = "CnnActorCritic"
+    state_dim = 12
+    depth_height = 64
+    depth_width = 64
+    depth_feature_dim = 128
+    state_feature_dim = 64
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -14,12 +22,12 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 500
     save_interval = 50
     experiment_name = "drone_avoidance_direct"
-    policy = RslRlPpoActorCriticCfg(
+    policy = CnnActorCriticCfg(
         init_noise_std=0.5,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[128, 64],
+        critic_hidden_dims=[128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(

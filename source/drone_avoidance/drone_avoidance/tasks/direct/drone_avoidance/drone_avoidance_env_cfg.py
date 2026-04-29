@@ -23,8 +23,8 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.0
     # - spaces definition
     action_space = 4
-    depth_obs_height = 16
-    depth_obs_width = 16
+    depth_obs_height = 64
+    depth_obs_width = 64
     observation_space = 12 + depth_obs_height * depth_obs_width
     state_space = 0
     debug_vis = True
@@ -63,8 +63,8 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1024,
-        env_spacing=20.0,
+        num_envs=512,
+        env_spacing=24.0,
         replicate_physics=True,
         clone_in_fabric=False,
     )
@@ -78,17 +78,21 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
     obstacle_radius = 0.5
-    num_obstacles = 3
+    num_obstacles = 5
     collision_penalty = -10.0
     near_obstacle_reward_scale = -2.0
     near_obstacle_distance = 1.5
-    alive_reward_scale = 0.5
+    alive_reward_scale = 0.4
     upright_reward_scale = 1.0
     action_penalty_scale = -0.02
     death_penalty = -8.0
     progress_reward_scale = 8.0
 
-    goal_xy_range = 6.0
+    side_offset_min = -2.0
+    side_offset_max = 2.0
+
+
+    goal_xy_range = 8.0
     goal_z_min = 0.7
     goal_z_max = 1.8
     flight_z_min = 0.15

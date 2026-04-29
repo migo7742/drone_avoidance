@@ -78,6 +78,11 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import drone_avoidance.tasks  # noqa: F401
+from drone_avoidance.tasks.direct.drone_avoidance.agents.cnn_actor_critic import CnnActorCritic
+import rsl_rl.runners.on_policy_runner as on_policy_runner
+
+on_policy_runner.CnnActorCritic = CnnActorCritic
+
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)

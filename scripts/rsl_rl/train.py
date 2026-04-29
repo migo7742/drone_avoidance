@@ -105,6 +105,11 @@ logger = logging.getLogger(__name__)
 
 import drone_avoidance.tasks  # noqa: F401
 
+from drone_avoidance.tasks.direct.drone_avoidance.agents.cnn_actor_critic import CnnActorCritic
+import rsl_rl.runners.on_policy_runner as on_policy_runner
+
+on_policy_runner.CnnActorCritic = CnnActorCritic
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False

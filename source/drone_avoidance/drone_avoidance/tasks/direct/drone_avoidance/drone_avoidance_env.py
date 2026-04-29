@@ -285,7 +285,10 @@ class DroneAvoidanceEnv(DirectRLEnv):
         path_vec = self._desired_pos_w[env_ids].unsqueeze(1) - start_pos_w.unsqueeze(1)
         self._obstacle_pos_w[env_ids] = start_pos_w.unsqueeze(1) + alpha * path_vec
 
-        side_offset = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(-0.2, 0.2)
+        side_offset = torch.zeros(len(env_ids), self.cfg.num_obstacles, 1, device=self.device).uniform_(
+            self.cfg.side_offset_min,
+            self.cfg.side_offset_max,
+        )
         self._obstacle_pos_w[env_ids, :, 1:2] += side_offset
         self._obstacle_pos_w[env_ids, :, 2] = torch.zeros_like(self._obstacle_pos_w[env_ids, :, 2]).uniform_(
             self.cfg.goal_z_min,
