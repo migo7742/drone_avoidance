@@ -76,11 +76,13 @@ class CnnActorCritic(nn.Module):
         act = make_activation(activation)
 
         self.depth_encoder = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=5, stride=2),
+            nn.Conv2d(1, 16, kernel_size=7, stride=2),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2),
+            nn.Conv2d(16, 32, kernel_size=5, stride=2),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2),
             nn.ReLU(),
             nn.Flatten(),
         )

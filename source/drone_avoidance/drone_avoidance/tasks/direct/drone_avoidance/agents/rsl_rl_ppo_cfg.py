@@ -11,30 +11,30 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 class CnnActorCriticCfg(RslRlPpoActorCriticCfg):
     class_name = "CnnActorCritic"
     state_dim = 12
-    depth_height = 64
-    depth_width = 64
+    depth_height = 72
+    depth_width = 128
     depth_feature_dim = 128
     state_feature_dim = 64
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 64
+    num_steps_per_env = 128
     max_iterations = 500
     save_interval = 50
     experiment_name = "drone_avoidance_direct"
     policy = CnnActorCriticCfg(
-        init_noise_std=0.5,
+        init_noise_std=0.2,
         actor_obs_normalization=False,
         critic_obs_normalization=False,
-        actor_hidden_dims=[128, 64],
-        critic_hidden_dims=[128, 64],
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.002,
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=8,
         learning_rate=1.0e-3,

@@ -11,7 +11,6 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab_assets import CRAZYFLIE_CFG
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.sensors import TiledCameraCfg
 
@@ -23,11 +22,11 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.0
     # - spaces definition
     action_space = 4
-    depth_obs_height = 64
-    depth_obs_width = 64
+    depth_obs_height = 72
+    depth_obs_width = 128
     observation_space = 12 + depth_obs_height * depth_obs_width
     state_space = 0
-    debug_vis = True
+    debug_vis = False
     
 
     # simulation
@@ -59,11 +58,36 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     )
 
     # robot(s)
-    robot_cfg: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot_cfg: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/Robot",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/migo/drone_avoidance/drone.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=10.0,
+                enable_gyroscopic_forces=True,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=0,
+                sleep_threshold=0.005,
+                stabilization_threshold=0.001,
+            ),
+            copy_from_source=False,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 1.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            joint_pos={},
+            joint_vel={},
+        ),
+        actuators={},
+    )
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=512,
+        num_envs=256,
         env_spacing=24.0,
         replicate_physics=True,
         clone_in_fabric=False,
@@ -71,34 +95,47 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
 
     
 
-    thrust_to_weight = 1.5
-    moment_scale = 0.003
+    thrust_to_weight = 4.7
+    moment_scale = 0.04
+    drone_radius = 0.15
 
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
-    distance_to_goal_reward_scale = 15.0
-    obstacle_radius = 0.5
-    num_obstacles = 5
-    collision_penalty = -10.0
-    near_obstacle_reward_scale = -2.0
-    near_obstacle_distance = 1.5
-    alive_reward_scale = 0.4
-    upright_reward_scale = 1.0
-    action_penalty_scale = -0.02
-    death_penalty = -8.0
-    progress_reward_scale = 8.0
-
-    side_offset_min = -2.0
-    side_offset_max = 2.0
-
+    lin_vel_reward_scale = -0.1
+    ang_vel_reward_scale = -0.5
 
     goal_xy_range = 8.0
-    goal_z_min = 0.7
-    goal_z_max = 1.8
-    flight_z_min = 0.15
-    flight_z_max = 2.5
+    goal_z_min = 1.0
+    goal_z_max = 1.6
     goal_radius = 0.3
+    reached_goal = 120.0
+    reached_radius = 0.2
+    distance_to_goal_reward_scale = 40.0
 
+    alive_reward_scale = 1.0
+    upright_reward_scale = 5.0
+    action_penalty_scale = -0.02
+    death_penalty = -80.0
+    progress_reward_scale = 20.0
+    lateral_vel_reward_scale = -2.0
+    forward_vel_reward_scale = 6.0
+    time_penalty_scale = -2.0
+    yaw_reward_scale = 10.0
+    
+    num_obstacles = 15
+    collision_penalty = -120.0
+    near_obstacle_reward_scale = -2.0
+    near_obstacle_distance = 2.5
+    obstacle_radius = 0.35
+    obstacle_path_alpha_min = 0.15
+    obstacle_path_alpha_max = 0.9
+    obstacle_lateral_range = 3.0
+    obstacle_z_min = 0.7
+    obstacle_z_max = 2.5
+    obstacle_min_spacing = 0.9
+    obstacle_sample_attempts = 200
+    
+    flight_z_min = 0.7
+    flight_z_max = 2.6
+    
     obstacle_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Obstacle",
         spawn=sim_utils.SphereCfg(
@@ -114,26 +151,27 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 0.0, 1.0))
     )
 
-    depth_width = 64
-    depth_height = 64
+    depth_width = 128
+    depth_height = 72
     depth_max_distance = 10.0
+    depth_min_distance = 0.28
 
     depth_camera: TiledCameraCfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/Robot/body/front_camera",
-        update_period=0.02,
+        prim_path="/World/envs/env_.*/Robot/body/front_camera_mount/front_camera",
+        update_period=1.0 / 30.0,
         height=depth_height,
         width=depth_width,
         data_types=["depth"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=11.04,
             focus_distance=400.0,
             horizontal_aperture=20.955,
-            clipping_range=(0.1, depth_max_distance),
+            clipping_range=(depth_min_distance, depth_max_distance),
 
         ),
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.08, 0.0, 0.02),
-            rot=(0.5, -0.5, 0.5, -0.5),
-            convention="ros",
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            convention="world",
         ),
     )
