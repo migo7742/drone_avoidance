@@ -34,6 +34,8 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--eval_episodes", type=int, default=1000, help="Number of completed episodes to evaluate.")
+parser.add_argument("--eval_print_interval", type=int, default=100, help="Print evaluation stats every N episodes.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -182,6 +184,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+
+    completed_episodes = 0
+    success_sum = 0.0
+    collision_sum = 0.0
+    died_sum = 0.0
+    timeout_sum = 0.0
+    final_distance_sum = 0.0
+    next_print_episode = args_cli.eval_print_interval
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -190,7 +200,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, dones, _ = env.step(actions)
+            obs, _, dones, extras = env.step(actions)
+
+            done_count = int(dones.sum().item())
+            log = extras.get("log", None)
+
+            if done_count > 0 and log is not None:
+                completed_episodes += done_count
+
+                success_sum += float(log.get("Metrics/success_rate", 0.0)) * done_count
+                collision_sum += float(log.get("Metrics/collision_rate", 0.0)) * done_count
+                died_sum += float(log.get("Metrics/died_rate", 0.0)) * done_count
+                timeout_sum += float(log.get("Metrics/timeout_rate", 0.0)) * done_count
+                final_distance_sum += float(log.get("Metrics/final_distance_to_goal", 0.0)) * done_count
+
+                if completed_episodes >= next_print_episode:
+                    print(
+                        f"[EVAL] episodes={completed_episodes} "
+                        f"success={success_sum / completed_episodes:.3f} "
+                        f"collision={collision_sum / completed_episodes:.3f} "
+                        f"died={died_sum / completed_episodes:.3f} "
+                        f"timeout={timeout_sum / completed_episodes:.3f} "
+                        f"final_dist={final_distance_sum / completed_episodes:.3f}"
+                    )
+                    next_print_episode += args_cli.eval_print_interval
+
+                if args_cli.eval_episodes > 0 and completed_episodes >= args_cli.eval_episodes:
+                    break
+
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         if args_cli.video:

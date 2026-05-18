@@ -106,24 +106,26 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     goal_z_min = 1.0
     goal_z_max = 1.6
     goal_radius = 0.3
-    reached_goal = 120.0
-    reached_radius = 0.2
+    reached_goal = 160.0
+    reached_enter_radius = 0.3
+    reached_exit_radius = 0.45
+    reached_hold_time = 1.0
     distance_to_goal_reward_scale = 40.0
 
     alive_reward_scale = 1.0
     upright_reward_scale = 5.0
     action_penalty_scale = -0.02
-    death_penalty = -80.0
+    death_penalty = -100.0
     progress_reward_scale = 20.0
     lateral_vel_reward_scale = -2.0
     forward_vel_reward_scale = 6.0
     time_penalty_scale = -2.0
-    yaw_reward_scale = 10.0
+    yaw_reward_scale = 5.0
     
     num_obstacles = 15
-    collision_penalty = -120.0
-    near_obstacle_reward_scale = -2.0
-    near_obstacle_distance = 2.5
+    collision_penalty = -180.0
+    near_obstacle_reward_scale = -3.0
+    near_obstacle_distance = 1.5
     obstacle_radius = 0.35
     obstacle_path_alpha_min = 0.15
     obstacle_path_alpha_max = 0.9

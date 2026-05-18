@@ -18,6 +18,7 @@ from isaaclab.sensors import TiledCamera
 import gymnasium as gym
 import torch.nn.functional as F
 from isaaclab.utils.math import subtract_frame_transforms
+from dataclasses import replace
 
 from .drone_avoidance_env_cfg import DroneAvoidanceEnvCfg
 
@@ -36,6 +37,10 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self._collision_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._died_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._reached_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._goal_hold_time = torch.zeros(self.num_envs, device=self.device)
+        self._goal_inside_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._goal_reached_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._goal_hold_update_step = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
         self._obstacle_radius = torch.full(
             (self.num_envs, self.cfg.num_obstacles, 1),
             self.cfg.obstacle_radius,
@@ -65,7 +70,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
             ]
         }
 
-        self._body_id = self.robot.find_bodies("body")[0]
+        body_ids, _ = self.robot.find_bodies("body")
+        self._body_id = torch.tensor(body_ids, dtype=torch.long, device=self.device)
         self._robot_mass = self.robot.root_physx_view.get_masses()[0].sum()
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
@@ -75,8 +81,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.obstacle = []
         for i in range(self.cfg.num_obstacles):
-            obstacle_cfg = self.cfg.obstacle_cfg.replace(
-                prim_path=f"/World/envs/env_.*/Obstacle_{i}"
+            obstacle_cfg = replace(
+                self.cfg.obstacle_cfg,
+                prim_path=f"/World/envs/env_.*/Obstacle_{i}",
             )
             obstacle = RigidObject(obstacle_cfg)
             self.obstacle.append(obstacle)
@@ -156,6 +163,32 @@ class DroneAvoidanceEnv(DirectRLEnv):
         )
         observations = {"policy": obs}
         return observations
+    
+    def _update_goal_reached(self) -> None:
+        needs_update = self._goal_hold_update_step != self.common_step_counter
+        if not torch.any(needs_update):
+            return
+        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self.robot.data.root_pos_w, dim=1)
+
+        inside_enter = distance_to_goal < self.cfg.reached_enter_radius
+        outside_exit = distance_to_goal > self.cfg.reached_exit_radius
+
+        goal_inside = self._goal_inside_buf.clone()
+        goal_inside[inside_enter] = True
+        goal_inside[outside_exit] = False
+
+        goal_hold_time = torch.where(
+            goal_inside,
+            self._goal_hold_time + self.step_dt,
+            torch.zeros_like(self._goal_hold_time),
+        )
+
+        goal_reached = goal_hold_time >= self.cfg.reached_hold_time
+
+        self._goal_inside_buf[needs_update] = goal_inside[needs_update]
+        self._goal_hold_time[needs_update] = goal_hold_time[needs_update]
+        self._goal_reached_buf[needs_update] = goal_reached[needs_update]
+        self._goal_hold_update_step[needs_update] = self.common_step_counter
 
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self.robot.data.root_lin_vel_b), dim=1)
@@ -188,10 +221,14 @@ class DroneAvoidanceEnv(DirectRLEnv):
 
         lateral_vel = torch.square(self.robot.data.root_lin_vel_b[:, 1])
 
-        reached = distance_to_goal < self.cfg.reached_radius
+        self._update_goal_reached()
+        reached = self._goal_reached_buf
 
-        forward_vel = torch.clamp(self.robot.data.root_lin_vel_b[:, 0], min=0.0)
-        forward_vel_to_goal = forward_vel * torch.clamp(heading_reward, min=0.0)
+        goal_vec_w = self._desired_pos_w - self.robot.data.root_pos_w
+        goal_dir_w = goal_vec_w / torch.linalg.norm(goal_vec_w, dim=1, keepdim=True).clamp_min(1e-6)
+
+        forward_vel_to_goal = torch.sum(self.robot.data.root_lin_vel_w * goal_dir_w, dim=1)
+        forward_vel_to_goal = torch.clamp(forward_vel_to_goal, min=0.0)
 
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -231,8 +268,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
         distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
         collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius + self.cfg.drone_radius, dim=1)
 
-        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self.robot.data.root_pos_w, dim=1)
-        reached = distance_to_goal < self.cfg.reached_radius
+        
+        self._update_goal_reached()
+        reached = self._goal_reached_buf
 
         self._collision_buf = collision
         self._died_buf = died
@@ -252,7 +290,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
             dim=1,
         )
         final_distance_to_goal = final_distance_to_goal_each.mean()
-        success_rate = torch.mean((final_distance_to_goal_each < self.cfg.goal_radius).float())
+        success_rate = torch.mean((self._goal_hold_time[env_ids] >= self.cfg.reached_hold_time).float())
 
         
 
@@ -288,18 +326,22 @@ class DroneAvoidanceEnv(DirectRLEnv):
 
         self.extras["log"].update(extras)
 
-        self.robot.reset(env_ids)
-        super()._reset_idx(env_ids)
+        self.robot.reset(env_ids) #type: ignore[arg-type]
+        super()._reset_idx(env_ids) #type: ignore[arg-type]
 
-        if len(env_ids) == self.num_envs:
-            self.episode_length_buf = torch.randint_like(
-                self.episode_length_buf,
-                high=int(self.max_episode_length),
-            )
+        # if len(env_ids) == self.num_envs:
+        #     self.episode_length_buf = torch.randint_like(
+        #         self.episode_length_buf,
+        #         high=int(self.max_episode_length),
+        #     )
 
         
 
         self._actions[env_ids] = 0.0
+        self._goal_hold_time[env_ids] = 0.0
+        self._goal_inside_buf[env_ids] = False
+        self._goal_reached_buf[env_ids] = False
+        self._goal_hold_update_step[env_ids] = -1
 
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(
             -self.cfg.goal_xy_range,
@@ -389,13 +431,13 @@ class DroneAvoidanceEnv(DirectRLEnv):
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.terrain.env_origins[env_ids]
 
-        self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids) #type: ignore[arg-type]
+        self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids) #type: ignore[arg-type]
 
         if self.robot.num_joints > 0:
             joint_pos = self.robot.data.default_joint_pos[env_ids]
             joint_vel = self.robot.data.default_joint_vel[env_ids]
-            self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+            self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids) #type: ignore[arg-type]
 
         self._prev_distance_to_goal[env_ids] = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self.robot.data.root_pos_w[env_ids],
@@ -405,26 +447,26 @@ class DroneAvoidanceEnv(DirectRLEnv):
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
             if not hasattr(self, "goal_pos_visualizer"):
-                goal_marker_cfg = CUBOID_MARKER_CFG.copy()
+                goal_marker_cfg = CUBOID_MARKER_CFG.copy() # type: ignore[attr-defined]
                 goal_marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
                 goal_marker_cfg.prim_path = "/Visuals/Command/goal_position"
                 self.goal_pos_visualizer = VisualizationMarkers(goal_marker_cfg)
 
-            if not hasattr(self, "obstacle_visualizer"):
-                obstacle_marker_cfg = SPHERE_MARKER_CFG.copy()
-                obstacle_marker_cfg.markers["sphere"].radius = self.cfg.obstacle_radius
-                obstacle_marker_cfg.prim_path = "/Visuals/Command/obstacle"
-                self.obstacle_visualizer = VisualizationMarkers(obstacle_marker_cfg)
+            # if not hasattr(self, "obstacle_visualizer"):
+            #     obstacle_marker_cfg = SPHERE_MARKER_CFG.copy()
+            #     obstacle_marker_cfg.markers["sphere"].radius = self.cfg.obstacle_radius
+            #     obstacle_marker_cfg.prim_path = "/Visuals/Command/obstacle"
+            #     self.obstacle_visualizer = VisualizationMarkers(obstacle_marker_cfg)
 
             self.goal_pos_visualizer.set_visibility(True)
-            self.obstacle_visualizer.set_visibility(True)
+            # self.obstacle_visualizer.set_visibility(True)
         else:
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
-            if hasattr(self, "obstacle_visualizer"):
-                self.obstacle_visualizer.set_visibility(False)
+            # if hasattr(self, "obstacle_visualizer"):
+            #     self.obstacle_visualizer.set_visibility(False)
     
     def _debug_vis_callback(self, event):
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
-        self.obstacle_visualizer.visualize(self._obstacle_pos_w.reshape(-1, 3))
+        # self.obstacle_visualizer.visualize(self._obstacle_pos_w.reshape(-1, 3))
         
