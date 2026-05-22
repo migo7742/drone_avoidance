@@ -1,0 +1,105 @@
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env.py
+	modified:   source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env_cfg.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env.py b/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env.py
+index 8db9058..156016e 100644
+--- a/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env.py
++++ b/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env.py
+@@ -194,7 +194,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
+         lin_vel = torch.sum(torch.square(self.robot.data.root_lin_vel_b), dim=1)
+         ang_vel = torch.sum(torch.square(self.robot.data.root_ang_vel_b), dim=1)
+         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self.robot.data.root_pos_w, dim=1)
+-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
++        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 4.0)
+         distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
+         min_distance_to_obstacle = torch.min(distance_to_obstacle, dim=1).values
+         collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius + self.cfg.drone_radius, dim=1)
+@@ -389,6 +389,13 @@ class DroneAvoidanceEnv(DirectRLEnv):
+ 
+         candidates = torch.cat([candidate_xy, z], dim=-1)
+ 
++        distance_to_start = torch.linalg.norm(candidate_xy - start_xy.unsqueeze(1), dim=-1)
++        distance_to_goal = torch.linalg.norm(candidate_xy - goal_xy.unsqueeze(1), dim=-1)
++        valid_candidates = torch.logical_and(
++            distance_to_start > self.cfg.obstacle_start_clearance,
++            distance_to_goal > self.cfg.obstacle_goal_clearance,
++        )
++
+         selected = torch.empty(
+             num_reset_envs,
+             self.cfg.num_obstacles,
+@@ -400,6 +407,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
+             count = 0
+ 
+             for cand_i in range(num_candidates):
++                if not valid_candidates[env_i, cand_i].item():
++                    continue
++
+                 candidate = candidates[env_i, cand_i]
+ 
+                 if count == 0:
+@@ -415,8 +425,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
+                     break
+ 
+             if count < self.cfg.num_obstacles:
+-                selected[env_i, count:] = candidates[env_i, : self.cfg.num_obstacles - count]
+-
++                selected[env_i, count:] = start_pos_w[env_i]
++                selected[env_i, count:, 2] = self.cfg.flight_z_max + 5.0
+         self._obstacle_pos_w[env_ids] = selected
+         
+         for i, obstacle in enumerate(self.obstacle):
+diff --git a/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env_cfg.py b/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env_cfg.py
+index 5be848e..da49609 100644
+--- a/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env_cfg.py
++++ b/source/drone_avoidance/drone_avoidance/tasks/direct/drone_avoidance/drone_avoidance_env_cfg.py
+@@ -99,7 +99,7 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
+     moment_scale = 0.04
+     drone_radius = 0.15
+ 
+-    lin_vel_reward_scale = -0.1
++    lin_vel_reward_scale = -0.2
+     ang_vel_reward_scale = -0.5
+ 
+     goal_xy_range = 8.0
+@@ -118,14 +118,14 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
+     death_penalty = -100.0
+     progress_reward_scale = 20.0
+     lateral_vel_reward_scale = -2.0
+-    forward_vel_reward_scale = 6.0
+-    time_penalty_scale = -2.0
++    forward_vel_reward_scale = 2.0
++    time_penalty_scale = -1.0
+     yaw_reward_scale = 5.0
+     
+     num_obstacles = 15
+     collision_penalty = -180.0
+-    near_obstacle_reward_scale = -3.0
+-    near_obstacle_distance = 1.5
++    near_obstacle_reward_scale = -7.0
++    near_obstacle_distance = 2.0
+     obstacle_radius = 0.35
+     obstacle_path_alpha_min = 0.15
+     obstacle_path_alpha_max = 0.9
+@@ -133,7 +133,9 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
+     obstacle_z_min = 0.7
+     obstacle_z_max = 2.5
+     obstacle_min_spacing = 0.9
+-    obstacle_sample_attempts = 200
++    obstacle_sample_attempts = 400
++    obstacle_start_clearance = 0.8
++    obstacle_goal_clearance = 0.8
+     
+     flight_z_min = 0.7
+     flight_z_max = 2.6

@@ -109,7 +109,7 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     reached_goal = 160.0
     reached_enter_radius = 0.3
     reached_exit_radius = 0.45
-    reached_hold_time = 1.0
+    reached_hold_time = 2.0
     distance_to_goal_reward_scale = 40.0
 
     alive_reward_scale = 1.0
@@ -118,14 +118,16 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     death_penalty = -100.0
     progress_reward_scale = 20.0
     lateral_vel_reward_scale = -2.0
-    forward_vel_reward_scale = 6.0
-    time_penalty_scale = -2.0
+    forward_vel_reward_scale = 2.0
+    time_penalty_scale = -1.0
     yaw_reward_scale = 5.0
+    max_speed = 2.0
+    speed_limit_reward_scale = -3.0
     
-    num_obstacles = 15
+    num_obstacles = 20
     collision_penalty = -180.0
-    near_obstacle_reward_scale = -3.0
-    near_obstacle_distance = 1.5
+    near_obstacle_reward_scale = -7.0
+    near_obstacle_distance = 2.0
     obstacle_radius = 0.35
     obstacle_path_alpha_min = 0.15
     obstacle_path_alpha_max = 0.9
@@ -133,10 +135,12 @@ class DroneAvoidanceEnvCfg(DirectRLEnvCfg):
     obstacle_z_min = 0.7
     obstacle_z_max = 2.5
     obstacle_min_spacing = 0.9
-    obstacle_sample_attempts = 200
+    obstacle_sample_attempts = 400
+    obstacle_start_clearance = 0.8
+    obstacle_goal_clearance = 0.8
     
-    flight_z_min = 0.7
-    flight_z_max = 2.6
+    flight_z_min = 0.2
+    flight_z_max = 5.6
     
     obstacle_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Obstacle",

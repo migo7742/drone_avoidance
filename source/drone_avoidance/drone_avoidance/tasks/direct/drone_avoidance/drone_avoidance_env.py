@@ -66,7 +66,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
                 "reached_goal",
                 "lateral_vel",
                 "forward_vel",
-                "time"
+                "time",
+                "speed_limit"
             ]
         }
 
@@ -194,7 +195,7 @@ class DroneAvoidanceEnv(DirectRLEnv):
         lin_vel = torch.sum(torch.square(self.robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self.robot.data.root_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self.robot.data.root_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 4.0)
         distance_to_obstacle = torch.linalg.norm(self._obstacle_pos_w - self.robot.data.root_pos_w.unsqueeze(1), dim=2)
         min_distance_to_obstacle = torch.min(distance_to_obstacle, dim=1).values
         collision = torch.any(distance_to_obstacle < self.cfg.obstacle_radius + self.cfg.drone_radius, dim=1)
@@ -230,6 +231,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
         forward_vel_to_goal = torch.sum(self.robot.data.root_lin_vel_w * goal_dir_w, dim=1)
         forward_vel_to_goal = torch.clamp(forward_vel_to_goal, min=0.0)
 
+        speed = torch.linalg.norm(self.robot.data.root_lin_vel_b, dim=1)
+        speed_over_limit = torch.clamp(speed - self.cfg.max_speed, min=0.0)
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
@@ -245,7 +249,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
             "reached_goal": reached.float() * self.cfg.reached_goal,
             "lateral_vel": lateral_vel * self.cfg.lateral_vel_reward_scale * self.step_dt,
             "forward_vel": forward_vel_to_goal * self.cfg.forward_vel_reward_scale * self.step_dt,
-            "time": torch.ones(self.num_envs, device=self.device) * self.cfg.time_penalty_scale * self.step_dt
+            "time": torch.ones(self.num_envs, device=self.device) * self.cfg.time_penalty_scale * self.step_dt,
+            "speed_limit": torch.square(speed_over_limit) * self.cfg.speed_limit_reward_scale * self.step_dt
 
         }
 
@@ -389,6 +394,13 @@ class DroneAvoidanceEnv(DirectRLEnv):
 
         candidates = torch.cat([candidate_xy, z], dim=-1)
 
+        distance_to_start = torch.linalg.norm(candidate_xy - start_xy.unsqueeze(1), dim=-1)
+        distance_to_goal = torch.linalg.norm(candidate_xy - goal_xy.unsqueeze(1), dim=-1)
+        valid_candidates = torch.logical_and(
+            distance_to_start > self.cfg.obstacle_start_clearance,
+            distance_to_goal > self.cfg.obstacle_goal_clearance,
+        )
+
         selected = torch.empty(
             num_reset_envs,
             self.cfg.num_obstacles,
@@ -400,6 +412,9 @@ class DroneAvoidanceEnv(DirectRLEnv):
             count = 0
 
             for cand_i in range(num_candidates):
+                if not valid_candidates[env_i, cand_i].item():
+                    continue
+
                 candidate = candidates[env_i, cand_i]
 
                 if count == 0:
@@ -415,8 +430,8 @@ class DroneAvoidanceEnv(DirectRLEnv):
                     break
 
             if count < self.cfg.num_obstacles:
-                selected[env_i, count:] = candidates[env_i, : self.cfg.num_obstacles - count]
-
+                selected[env_i, count:] = start_pos_w[env_i]
+                selected[env_i, count:, 2] = self.cfg.flight_z_max + 5.0
         self._obstacle_pos_w[env_ids] = selected
         
         for i, obstacle in enumerate(self.obstacle):
